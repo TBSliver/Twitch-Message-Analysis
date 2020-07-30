@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="https://unpkg.com/unfetch/polyfill"></script>
+<script src="https://unpkg.com/dayjs@1.8.21/dayjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.3/dist/Chart.min.js" integrity="sha256-R4pqcOYV8lt7snxMQO/HSbVCFRPMdrhAFMH+vr9giYI=" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/moment@2.27.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@0.1.1"></script>
+<script src="https://unpkg.com/dexie@latest/dist/dexie.js"></script>
+<style>
+.graph {
+width: 1200px;
+height: 600px;
+}
+</style>
+</head>
+<body>
+<div>
+<h1>Twitch Message Analysis</h1>
+<p>Yes it looks crap. its a Work In Progress (WIP)</p>
+</div>
+<div class="graph">
+<canvas id="streamData"></canvas>
+</div>
+<div>Video ID: <input id="videoId" value="689698591"><button id="submitId">Submit</button></div>
+<div><ul id="status"><li>Page Loaded</li></ul></div>
+<script>
+
+const chartColors = {
+	red: 'rgb(255, 99, 132)',
+	orange: 'rgb(255, 159, 64)',
+	yellow: 'rgb(255, 205, 86)',
+	green: 'rgb(75, 192, 192)',
+	blue: 'rgb(54, 162, 235)',
+	purple: 'rgb(153, 102, 255)',
+	grey: 'rgb(201, 203, 207)'
+};
+
+// half stolen from https://github.com/lay295/TwitchDownloader
+var ctx = document.getElementById('streamData').getContext('2d');
+var myChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+        datasets: [
+            {
+                label: 'Chat Messages by Minute',
+                data: [],
+                borderColor: chartColors.green
+            }
+        ]
+    },
+    options: {
+        scales: {
+            xAxes: [{
+                type: 'time'
+            }],
+            yAxes: [{
+                ticks: {
+                    beginAtZero: true
+                }
+            }]
+        }
+    }
+});
+
+async function getVidComments(vodId, cursor = '') {
+    const output = {comments: [], complete: false};
+    const uri = `https://api.twitch.tv/v5/videos/${vodId}/comments?cursor=${cursor}`;
+    const data = await fetch(uri, {
+        headers: {
+            'Accept': "application/vnd.twitchtv.v5+json; charset=UTF-8",
+            'Client-Id': "7di08kjp2jszxfso803hj1ea5p2msl"
+        }
+    })
+    .then(r => r.json())
+    .then(async r => {
+        output.comments = output.comments.concat(r.comments);
+        setStatusText(`Downloaded ${output.comments.length} messages from ${output.comments[0].created_at} to ${output.comments[output.comments.length - 1].created_at}`);
+        if (!r._next) return;
+        const more = await getVidComments(vodId, r._next);
+        output.comments = output.comments.concat(more.comments);
+    });
+    output.complete = true;
+    return output;
+}
+
+function setStatusText(text) {
+    const li = document.createElement('li');
+    li.textContent = text;
+    document.getElementById('status').prepend(li);
+}
+
+setStatusText('Loading DB');
+const db = new Dexie('twitch-vids');
+db.version(1).stores({
+    videos: 'id,data'
+});
+
+async function fetchVideo() {
+//https://www.twitch.tv/videos/689698591
+//690556421
+    const videoId = document.getElementById('videoId').value;
+    
+    setStatusText('Loading Data for video ' + videoId);
+    let row = await db.videos.get(videoId);
+    let data;
+    if (!(row && row.data.complete)) {
+        setStatusText('No cached data found, downloading, please wait...');
+        // If its not there, or not complete, get it and store it.
+        data = await getVidComments(videoId);
+        setStatusText(`Downloaded ${data.comments.length} Messages in total`);
+        await db.videos.put({id: videoId, data: data}).catch(e => setStatusText('Error caching data, will continue without cache'));
+    } else {
+        setStatusText('Cached data found, loading from Cache');
+        data = row.data;
+    }
+    
+    let graphData = {
+        minute: {}
+    };
+    
+    try {
+        data.comments.forEach(comment => {
+            const commentDate = dayjs(comment.created_at);
+            const minuteDate = commentDate.clone().startOf('minute');        
+            
+            if (graphData.minute[minuteDate.toISOString()])
+                graphData.minute[minuteDate.toISOString()]++;
+            else
+                graphData.minute[minuteDate.toISOString()] = 1;
+        });
+    } catch(e) {
+        setStatusText('Error parsing data, is the video ID correct?');
+        // Delete the data just in case
+        db.videos.delete(videoId);
+    }
+
+    let minuteGraphData = [];
+    
+    Object.keys(graphData.minute).sort().forEach(d => {
+        minuteGraphData.push({
+            x: d,
+            y: graphData.minute[d]
+        });
+    });
+    
+    myChart.data.datasets[0].data = minuteGraphData;
+    myChart.update();
+};
+
+document.getElementById('submitId').addEventListener('click', () => {
+    fetchVideo();
+});
+</script>
+</body>
+</html>
